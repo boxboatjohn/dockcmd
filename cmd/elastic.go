@@ -39,87 +39,123 @@ var (
 	es7Client       *elasticsearch7.Client
 )
 
-func getEs6Client() *elasticsearch6.Client {
-	Logger.Debugln("Using v6 client")
-	if es6Client == nil {
-		cfg := elasticsearch6.Config{
-			Addresses: []string{
-				esURL,
-			},
-			Username: esUsername,
-			Password: esPassword,
-			APIKey:   esAPIKey,
-		}
-		Logger.Debugf("Username:[%s]", cfg.Username)
-		Logger.Debugf("Password:[%s]", cfg.Password)
-		Logger.Debugf("ApiKey:[%s]", cfg.APIKey)
-		var err error
-		es6Client, err = elasticsearch6.NewClient(cfg)
-		HandleError(err)
-	}
-	return es6Client
+type sixClient struct{
+	Client *elasticsearch6.Client
 }
 
-func getEs7Client() *elasticsearch7.Client {
-	Logger.Debugln("Using v7 client")
-	if es7Client == nil {
-		cfg := elasticsearch7.Config{
-			Addresses: []string{
-				esURL,
-			},
-			Username: esUsername,
-			Password: esPassword,
-			APIKey:   esAPIKey,
-		}
-		Logger.Debugf("Username:[%s]", cfg.Username)
-		Logger.Debugf("Password:[%s]", cfg.Password)
-		Logger.Debugf("ApiKey:[%s]", cfg.APIKey)
-		var err error
-		es7Client, err = elasticsearch7.NewClient(cfg)
-		HandleError(err)
-	}
-	return es7Client
+type sevenClient struct {
+	Client *elasticsearch7.Client
 }
 
-func deleteIndex(delete []string) {
-	if esVersion == "v6" {
-		esClient := getEs6Client()
-		esClient.Indices.Delete(delete)
-	} else if esVersion == "v7" {
-		esClient := getEs7Client()
-		esClient.Indices.Delete(delete)
-	}
+type Client interface {
+	Find([]string) map[string]interface{}
+	Delete([]string)
 }
 
-func findIndices(search []string) map[string]interface{} {
+func (c *sixClient) Delete(indices []string) {
+	c.Client.Indices.Delete(indices)
+}
 
+func (c *sevenClient) Delete(indices []string) {
+	c.Client.Indices.Delete(indices)
+}
+
+func (c *sixClient) Find(search []string) map[string]interface{} {
 	var indices map[string]interface{}
-
-	if esVersion == "v6" {
-		esClient := getEs6Client()
-		response, err := esClient.Indices.Get(search)
-		HandleError(err)
-		if response.IsError() {
-			HandleError(
-				fmt.Errorf(
-					"Error: %s",
-					response.String()))
-		}
-		json.NewDecoder(response.Body).Decode(&indices)
-
-	} else if esVersion == "v7" {
-		esClient := getEs7Client()
-		response, err := esClient.Indices.Get(search)
-		HandleError(err)
-		if response.IsError() {
-			HandleError(
-				fmt.Errorf(
-					"Error: %s",
-					response.String()))
-		}
-		json.NewDecoder(response.Body).Decode(&indices)
+	response, err := c.Client.Indices.Get(search)
+	HandleError(err)
+	if response.IsError() {
+		HandleError(
+			fmt.Errorf(
+				"Error: %s",
+				response.String()))
 	}
+	json.NewDecoder(response.Body).Decode(&indices)
+
 	return indices
+}
+
+func (c *sevenClient) Find(search []string) map[string]interface{} {
+	var indices map[string]interface{}
+	response, err := c.Client.Indices.Get(search)
+	HandleError(err)
+	if response.IsError() {
+		HandleError(
+			fmt.Errorf(
+				"Error: %s",
+				response.String()))
+	}
+	json.NewDecoder(response.Body).Decode(&indices)
+
+	return indices
+}
+
+func deleteIndex(client Client, delete []string) {
+	client.Delete(delete)
+}
+
+func findIndices(client Client, search []string) map[string]interface{} {
+	return client.Find(search)
+}
+
+func NewES6Client() (Client, error){
+	var client sixClient
+
+	cfg := elasticsearch6.Config{
+		Addresses: []string{
+			esURL,
+		},
+		Username: esUsername,
+		Password: esPassword,
+		APIKey:   esAPIKey,
+	}
+	es6Client, err := elasticsearch6.NewClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	client.Client = es6Client
+	return &client, err
+}
+
+func NewES7Client() (Client, error) {
+	var client sevenClient
+
+	cfg := elasticsearch7.Config{
+		Addresses: []string{
+			esURL,
+		},
+		Username: esUsername,
+		Password: esPassword,
+		APIKey:   esAPIKey,
+	}
+	es7Client, err := elasticsearch7.NewClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	client.Client = es7Client
+	return &client, err
+}
+
+
+func getESClient() Client {
+	var client Client
+	var err error
+	if esVersion == "v6" {
+		client, err = NewES6Client()
+	}
+	if esVersion == "v7" {
+		client, err = NewES7Client()
+	}
+	HandleError(err)
+
+	Logger.Debugf("Using %s client", esVersion)
+	Logger.Debugf("Username:[%s]", esUsername)
+	Logger.Debugf("Password:[%s]", esPassword)
+	Logger.Debugf("ApiKey:[%s]", esAPIKey)
+
+	return client
 }
 
 var esDeleteIndicesCmd = &cobra.Command{
@@ -137,7 +173,9 @@ var esDeleteIndicesCmd = &cobra.Command{
 		}
 		Logger.Debugf("Deleting [%s] from elasticsearch", search)
 
-		indices := findIndices(search)
+		client := getESClient()
+
+		indices := findIndices(client, search)
 
 		for k, v := range indices {
 			settings := v.(map[string]interface{})["settings"].(map[string]interface{})
@@ -152,7 +190,7 @@ var esDeleteIndicesCmd = &cobra.Command{
 			if age.Seconds() > float64(esRetentionDays*24.0*60.0*60.0) {
 				if esDryRun == false {
 					fmt.Printf("Deleting index [%s]\n", k)
-					deleteIndex([]string{k})
+					client.Delete([]string{k})
 				} else {
 					fmt.Printf("[%s] would be deleted\n", k)
 				}
@@ -177,7 +215,9 @@ var esGetIndicesCmd = &cobra.Command{
 		}
 		Logger.Debugf("Searching elasticsearch for [%s]", search)
 
-		indices := findIndices(search)
+		client := getESClient()
+
+		indices := client.Find(search)
 		var out []byte
 		var err error
 		if esPrettyPrint {
